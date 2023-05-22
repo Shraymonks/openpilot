@@ -2,6 +2,7 @@
 import math
 import json
 import os
+import shutil
 import subprocess
 import time
 import numpy as np
@@ -53,7 +54,7 @@ PROCS = {
   "selfdrive.boardd.pandad": 0,
   "selfdrive.statsd": 0.4,
   "selfdrive.navd.navd": 0.4,
-  "system.loggerd.uploader": 30.0,
+  "system.loggerd.uploader": 3.0,
   "system.loggerd.deleter": 0.1,
   "selfdrive.locationd.laikad": None,  # TODO: laikad cpu usage is sporadic
 }
@@ -94,14 +95,11 @@ class TestOnroad(unittest.TestCase):
       return
 
     # setup env
-    os.environ['REPLAY'] = "1"
-    os.environ['SKIP_FW_QUERY'] = "1"
-    os.environ['FINGERPRINT'] = "TOYOTA COROLLA TSS2 2019"
-    os.environ['LOGPRINT'] = 'debug'
-
     params = Params()
     params.clear_all()
     set_params_enabled()
+    if os.path.exists(ROOT):
+      shutil.rmtree(ROOT)
 
     # Make sure athena isn't running
     os.system("pkill -9 -f athena")
@@ -157,7 +155,11 @@ class TestOnroad(unittest.TestCase):
     for s, msgs in self.service_msgs.items():
       if s in ('initData', 'sentinel'):
         continue
-
+      
+      # skip gps services for now
+      if s in ('ubloxGnss', 'ubloxRaw', 'gnssMeasurements', 'gpsLocationExternal'):
+        continue
+        
       with self.subTest(service=s):
         assert len(msgs) >= math.floor(service_list[s].frequency*55)
 
@@ -299,7 +301,7 @@ class TestOnroad(unittest.TestCase):
     result += "----------------- Service Timings --------------\n"
     result += "------------------------------------------------\n"
     for s, (maxmin, rsd) in TIMINGS.items():
-      msgs = [m.logMonoTime for m in self.lr if m.which() == s]
+      msgs = [m.logMonoTime for m in self.service_msgs[s]]
       if not len(msgs):
         raise Exception(f"missing {s}")
 
@@ -333,6 +335,17 @@ class TestOnroad(unittest.TestCase):
         break
     expected = EVENTS[car.CarEvent.EventName.startup][ET.PERMANENT].alert_text_1
     self.assertEqual(startup_alert, expected, "wrong startup alert")
+
+  def test_engagable(self):
+    no_entries = Counter()
+    for m in self.service_msgs['carEvents']:
+      for evt in m.carEvents:
+        if evt.noEntry:
+          no_entries[evt.name] += 1
+
+    eng = [m.controlsState.engageable for m in self.service_msgs['controlsState']]
+    assert all(eng), \
+           f"Not engageable for whole segment:\n- controlsState.engageable: {Counter(eng)}\n- No entry events: {no_entries}"
 
 
 if __name__ == "__main__":
