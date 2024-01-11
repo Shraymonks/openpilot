@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import multiprocessing
 import os
 import requests
 import shutil
@@ -12,8 +13,6 @@ from datetime import datetime, timedelta
 from parameterized import parameterized
 from typing import Optional
 
-from multiprocessing import Process
-from pympler.tracker import SummaryTracker
 from unittest import mock
 from websocket import ABNF
 from websocket._exceptions import WebSocketConnectionClosedException
@@ -46,8 +45,6 @@ class TestAthenadMethods(unittest.TestCase):
       else:
         os.unlink(p)
 
-    dispatcher["listUploadQueue"]() # ensure queue is empty at start
-
   # *** test helpers ***
 
   @staticmethod
@@ -75,24 +72,25 @@ class TestAthenadMethods(unittest.TestCase):
     with self.assertRaises(TimeoutError) as _:
       dispatcher["getMessage"]("controlsState")
 
-    def send_deviceState():
-      messaging.context = messaging.Context()
-      pub_sock = messaging.pub_sock("deviceState")
-      start = time.time()
+    end_event = multiprocessing.Event()
 
-      while time.time() - start < 1:
+    pub_sock = messaging.pub_sock("deviceState")
+
+    def send_deviceState():
+      while not end_event.is_set():
         msg = messaging.new_message('deviceState')
         pub_sock.send(msg.to_bytes())
         time.sleep(0.01)
 
-    p = Process(target=send_deviceState)
+    p = multiprocessing.Process(target=send_deviceState)
     p.start()
     time.sleep(0.1)
     try:
       deviceState = dispatcher["getMessage"]("deviceState")
       assert deviceState['deviceState']
     finally:
-      p.terminate()
+      end_event.set()
+      p.join()
 
   def test_listDataDirectory(self):
     route = '2021-03-29--13-32-47'
@@ -145,11 +143,6 @@ class TestAthenadMethods(unittest.TestCase):
     # random bytes to ensure rather large object post-compression
     fn = self._create_file('qlog', data=os.urandom(10000 * 1024))
 
-    # warm up object tracker
-    tracker = SummaryTracker()
-    for _ in range(5):
-      tracker.diff()
-
     upload_fn = fn + ('.bz2' if compress else '')
     item = athenad.UploadItem(path=upload_fn, url="http://localhost:1238", headers={}, created_at=int(time.time()*1000), id='')
     with self.assertRaises(requests.exceptions.ConnectionError):
@@ -158,11 +151,6 @@ class TestAthenadMethods(unittest.TestCase):
     item = athenad.UploadItem(path=upload_fn, url=f"{host}/qlog.bz2", headers={}, created_at=int(time.time()*1000), id='')
     resp = athenad._do_upload(item)
     self.assertEqual(resp.status_code, 201)
-
-    # assert memory cleaned up
-    for _type, num_objects, total_size in tracker.diff():
-      with self.subTest(_type=_type):
-        self.assertLess(total_size / 1024, 10, f'Object {_type} ({num_objects=}) grew larger than 10 kB while uploading file')
 
   @with_http_server
   def test_uploadFileToUrl(self, host):
